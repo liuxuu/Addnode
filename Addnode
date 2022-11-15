@@ -279,7 +279,7 @@ function Docker_install() {
 function Docker_image_load() {
   systemctl status docker|grep Active|grep -q running &> /dev/null || { logger warn "Install_docker : docker没有运行."; return 0; }
   logger info "Docker_load : 导入基础镜像"
-  docker load -i /tmp/pause.tar.gz
+  docker load -i /tmp/nodefile/pause.tar.gz
 }
 
 function Kubelet_install() {
