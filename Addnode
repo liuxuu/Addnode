@@ -1,0 +1,611 @@
+#!/bin/bash
+#####################################################
+#SCRIPT NAME : Add-node                             #
+#     AUTHOR : wx883696                             #
+#CREATE DATE : Sat 22 Oct 2022 08:00:00 PM CST 2022 #
+#####################################################
+
+#set -xe
+
+# 下载安装包
+Download_Url="https://jiaofu-tools.obs.cn-east-2.myhuaweicloud.com"
+# 安装包路径
+Base_Dir="/tmp/nodefile"
+# Kubernetes配置文件路径
+Master_cert_route="/etc/kubernetes"
+# Kubernetes中Etcd证书路径
+ETCD_cert_route="/etc/etcd/etcdSSL/"
+# 安装包名称
+Package="nodefile.tar.gz"
+# 集群解析地址
+Cluster_dns=10.0.6.200
+# 容器网段
+Cluster_cidr=172.16.0.0/16
+
+
+function usage() {
+  echo -e "\033[33mUsage:\033[0m ./Addnode [options]"
+  cat <<EOF
+  option: -{WP}
+    -W         创建需要添加节点的 env.txt 模板，请修改为您的相应配置
+    -P         读取默认配置文件 (env.txt) ，安装所有节点
+EOF
+}
+
+function logger() {
+  TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+  case "$1" in
+    debug)
+      echo -e "$TIMESTAMP \033[36mDEBUG\033[0m $2"
+      ;;
+    info)
+      echo -e "$TIMESTAMP \033[32mINFO\033[0m  $2"
+      ;;
+    warn)
+      echo -e "$TIMESTAMP \033[33mWARN\033[0m  $2"
+      ;;
+    error)
+      echo -e "$TIMESTAMP \033[31mERROR\033[0m $2"
+      ;;
+    *)
+      ;;
+  esac
+}
+
+function Exist_env_txt () {
+  logger info "已存在env.txt"
+}
+
+function Environment() {
+  cat > env.txt << EOF
+# Master服务器密码
+Master_Passwd=xxxxx
+
+# 需要添加的node服务器密码
+Node_Passwd=xxxxxx
+
+# Master IP地址
+MasterIp=192.168.22.2
+
+# 需要添加进Kubernetes集群的Node节点IP,空格分隔
+NodeIpArray=192.168.22.6 192.168.22.4
+EOF
+logger info "请修改env.txt中需要添加的node信息"
+sleep 1
+}
+
+function Check_env() {
+#  ping -c1 -W1 www.baidu.com &> /dev/null
+
+#  if [[ $? -eq 0 ]];then
+      rpm -qa | grep "sshpass" &> /dev/null
+      if [[ $? -ne 0 ]];then
+         logger info  "安装sshpass...";
+
+         result=`uname -m`
+
+         if [[ $result = "x86_64" ]]
+         then
+             File_dir="down/amd64"
+         elif [[ $result = "aarch64" ]]
+         then
+             File_dir="down/arm64"
+         fi
+         
+         yum localinstall -y $Base_Dir/$File_dir/sshpass*.rpm &> /dev/null
+         
+         if [[ $? -eq 0 ]];then
+            logger info  "sshpass安装成功"
+         else
+           { logger error "sshpass安装失败"; exit 1; }
+         fi
+
+      else
+         logger warn  "sshpass已安装"
+     fi
+#  else
+#      { logger error "请配置网络"; exit 1; }
+#  fi
+}
+
+function Check_ip_network_passwd() {
+  regex="\b(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[1-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[1-9])\b"
+  ckStep2=`echo $1 | egrep $regex | wc -l`
+  if [ $ckStep2 -eq 0 ]
+  then
+         logger error "此 $1 不是合法的IP地址!!!"
+         exit 1
+  else
+         # 测试网络
+         ping -c1 -W1 $1 &> /dev/null
+         if [[ $? -ne 0 ]];then
+           { logger error "$1 网络不通，请检查。"; exit 1;}
+         fi
+
+         # 测试密码
+         sshpath="/root/.ssh/id_rsa.pub"
+         [[ -f $sshpath ]] || ssh-keygen -t rsa -P '' -f ~/.ssh/id_rsa && touch /root/.ssh/authorized_keys &> /dev/null
+         if [[ $? -ne 0 ]];then
+           { logger error "服务器 $1 的密码：\"$2\" 错误，请检查。"; exit 1;}
+         else
+           # 检查$1服务器是否已经存在认证公钥
+           if (sshpass -p $2 ssh -o StrictHostKeyChecking=no $1 test -e /root/.ssh/id_rsa.pub);then
+              logger warn "$1 存在/root/.ssh/id_rsa.pub"
+           else 
+              sshpass -p $2 ssh -o StrictHostKeyChecking=no $1 "ssh-keygen -t rsa -P '' -f ~/.ssh/id_rsa && touch /root/.ssh/authorized_keys; exit 1" &> /dev/null
+           fi
+           local_result=`cat $sshpath`
+           remote_result=`sshpass -p $2 ssh -o StrictHostKeyChecking=no $1 "cat /root/.ssh/authorized_keys"`
+           if [[ $remote_result = "" ]];then
+               sshpass -p $2 ssh -o StrictHostKeyChecking=no $1 "echo $local_result > /root/.ssh/authorized_keys"
+           else
+               sshpass -p $2 ssh -o StrictHostKeyChecking=no $1 "cat /root/.ssh/authorized_keys" | while read line
+               do
+                   if [[ $i = $local_result ]];then
+                      logger warn "$1 已免密"
+                   else
+                      sshpass -p $2 ssh -o StrictHostKeyChecking=no $1 "echo $local_result >> /root/.ssh/authorized_keys"
+                   fi
+               done
+           fi
+         fi
+  fi
+}
+
+function Read_env_txt() {
+  Ma_Passwd=`cat env.txt | grep Master_Passwd   | awk -F"=" '{print $2}'`
+  Nd_Passwd=`cat env.txt | grep Node_Passwd     | awk -F"=" '{print $2}'`
+  IP_Master=`cat env.txt | grep MasterIp        | awk -F"=" '{print $2}'`
+  IP_Node_Array=`cat env.txt | grep NodeIpArray | awk -F"=" '{print $2}'`
+
+  Check_ip_network_passwd $IP_Master $Ma_Passwd
+
+  for ip in $IP_Node_Array
+  do
+     Check_ip_network_passwd $ip $Nd_Passwd
+  done
+}
+
+function Download_resource() {
+    [[ -f /tmp/$Package ]] && { logger warn "Download_resource : 资源包已存在."; return 0; }
+    logger info "下载安装资源包,  $Package"
+    if [[ -e /usr/bin/curl ]];then
+      logger info "curl -O --retry 3 "$Download_Url/$Package" -o /tmp/"
+      curl -o /tmp/$Package --retry 3  "$Download_Url/$Package" -o /tmp/ || { logger error "Download_resource : 下载资源失败"; exit 1; }
+    else
+      wget -c "$Download_Url/$Package" -O /tmp/ || { logger error "Download_resource : 下载资源失败"; exit 1; }
+    fi
+    tar xf /tmp/nodefile.tar.gz -C /tmp &> /dev/null
+}
+
+function Scp_master_local() {
+  logger info "Install_requirement : 从Master $IP_Master 拷贝集群文件到本地文件夹 \033[0;34;1m $Base_Dir/k8s \033[0m..."
+  logger debug "scp -r $IP_Master:$Master_cert_route/{bootstrap.kubeconfig,kube-proxy.kubeconfig,kubernetesTLS,config} $Base_Dir/k8s"
+  scp -r $IP_Master:$Master_cert_route/{bootstrap.kubeconfig,kube-proxy.kubeconfig,kubernetesTLS,config} $Base_Dir/k8s &> /dev/null
+  logger debug "scp -r $IP_Master:$ETCD_cert_route $Base_Dir/k8s"
+  scp -r $IP_Master:$ETCD_cert_route $Base_Dir/k8s &> /dev/null
+  if [[ $? -ne 0 ]];then
+     { logger error "从 $IP_Master 拷贝文件到本地 $Base_Dir 失败，请检查"; exit 1;}
+  fi
+}
+
+function Scp_remote_host() {
+  logger info "Install_requirement : 向 $1 拷贝安装文件..."
+
+  if [[ $Arch = "x86_64" ]]
+  then
+      File_dir="down/amd64"
+  elif [[ $Arch = "aarch64" ]]
+  then
+      File_dir="down/arm64"
+  fi
+
+  logger debug "Install_requirement : scp $Base_Dir/$File_dir/* $1:/tmp/nodefile"
+  scp $Base_Dir/$File_dir/* $1:/tmp/nodefile &> /dev/null;
+
+  Base_File="$Base_Dir/base"
+  File_list="k8s.conf ipvs.sh"
+
+  for file in $File_list
+  do
+        logger debug "Install_requirement : scp $Base_File/$file $1:/tmp/nodefile"
+        scp $Base_File/$file $1:/tmp/nodefile &> /dev/null;
+        if [[ $? -ne 0 ]];then
+           { logger error "文件：$File_amd64$file 发送至 $1 失败，请检查"; exit 1;}
+        fi
+  done
+
+  Base_File="$Base_Dir/k8s"
+  File_list="bootstrap.kubeconfig kube-proxy.kubeconfig kubernetesTLS config etcdSSL"
+
+  for file in $File_list
+  do
+        logger debug "Install_requirement : scp -r $Base_File/$file $1:/tmp/nodefile"
+        scp -r $Base_File/$file $1:/tmp/nodefile &> /dev/null;
+        if [[ $? -ne 0 ]];then
+           { logger error "文件：$File_amd64$file 发送至 $1 失败，请检查"; exit 1;}
+        fi
+  done
+
+}
+
+function Init_server() {
+  logger info "Init_server : 关闭防火墙"
+  systemctl stop firewalld && systemctl disable firewalld &> /dev/null
+  
+  logger info "Init_server : 关闭Selinux"
+  setenforce 0 && sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+
+  logger info "Init_server : 关闭Swap"
+  swapoff -a && sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab &> /dev/null 
+}
+
+function Bash_install() {
+  logger info "Base_install : 基础软件安装..."
+  yum install -y /tmp/nodefile/*.rpm &> /dev/null
+
+  logger info "Base_install : 同步时间"
+  ntpdate cn.pool.ntp.org && hwclock -w &> /dev/null
+
+  logger info "Base_install : 服务器调优"
+  \cp /tmp/nodefile/k8s.conf /etc/sysctl.d/k8s.conf
+  sysctl -p /etc/sysctl.d/k8s.conf &> /dev/null
+
+  logger info "Base_install : 开启ipvs转发"
+  chmod +x /tmp/nodefile/ipvs.sh && /tmp/nodefile/ipvs.sh
+  echo ""
+}
+
+function Docker_install() {
+
+  systemctl status docker|grep Active|grep -q running &> /dev/null && { logger warn "Install_docker : docker已经在运行了."; return 0; }
+
+  logger debug "Install_docker : 解压 docker-19.03.8.tgz"
+  tar xf /tmp/nodefile/docker-19.03.8.tgz -C /tmp/nodefile/ &> /dev/null
+  logger debug "Install_docker : 安装 docker 中..."
+  yum install -y /tmp/nodefile/docker/*.rpm &> /dev/null
+
+  groupadd docker &> /dev/null
+
+
+  logger info "Install_docker : enable and start docker"
+  systemctl  enable docker.service && systemctl  restart docker.service
+  sleep 4
+  systemctl status docker|grep Active|grep -q running &> /dev/null && logger info "Install_docker : docker安装successful"
+  echo ""
+
+}
+
+function Docker_image_load() {
+  systemctl status docker|grep Active|grep -q running &> /dev/null || { logger warn "Install_docker : docker没有运行."; return 0; }
+  logger info "Docker_load : 导入基础镜像"
+  docker load -i /tmp/pause.tar.gz
+}
+
+function Kubelet_install() {
+  systemctl status kubelet |grep Active|grep -q running &> /dev/null && { logger warn "Install_kublet : kubelet已经在运行了."; return 0; }
+  logger info "Install_kubelet : 拷贝所需配置文件"
+  logger debug "Install_kubelet : cp -r $2/k8s/etcdSSL /etc/etcd/"
+  \cp -r $2/k8s/etcdSSL /etc/etcd/ &> /dev/null
+  logger debug "Install_kubelet : cp -r $2/{bootstrap.kubeconfig,kube-proxy.kubeconfig,kubernetesTLS,config} /etc/kubernetes"
+  \cp -r $2/{bootstrap.kubeconfig,kube-proxy.kubeconfig,kubernetesTLS,config} /etc/kubernetes &> /dev/null
+  logger debug "Install_kubelet : cp -r $2/kubelet /usr/local/bin/"
+  [[ -f /usr/local/bin/kubelet ]] || \cp -r $2/kubelet /usr/local/bin/ && chmod +x /usr/local/bin/kubelet &> /dev/null
+
+  logger info "Install_kubelet : 拷贝kubelet.service"
+  cat > /usr/lib/systemd/system/kubelet.service << EOF
+[Unit]
+Description=Kubernetes Kubelet Server
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+After=docker.service
+Requires=docker.service
+
+[Service]
+EnvironmentFile=-/etc/kubernetes/config
+EnvironmentFile=-/etc/kubernetes/kubelet
+ExecStart=/usr/local/bin/kubelet \\
+            \$KUBE_LOGTOSTDERR \\
+            \$KUBE_LOG_LEVEL \\
+            \$KUBELET_CONFIG\\
+            \$KUBELET_ADDRESS \\
+            \$KUBELET_PORT \\
+            \$KUBELET_HOSTNAME \\
+            \$KUBELET_POD_INFRA_CONTAINER \\
+            \$KUBELET_ARGS
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  if [[ $3 = "x86_64" ]]
+  then
+      Pause_Image="zjhw/pause-amd64:3.2"
+  elif [[ $3 = "aarch64" ]]
+  then
+      Pause_Image="zjhw/pause-arm64:3.2"
+  fi
+
+  logger info "Install_kubelet : 生成kubelet配置文件"
+
+cat << EOF > /etc/kubernetes/kubelet
+# kubelet (minion) config
+#
+## The address for the info server to serve on (set to 0.0.0.0 or "" for all interfaces)
+KUBELET_ADDRESS="--address=0.0.0.0"
+#
+## The port for the info server to serve on
+KUBELET_PORT="--port=10250"
+#
+## You may leave this blank to use the actual hostname
+KUBELET_HOSTNAME="--hostname-override=$1"
+#
+## location of the api-server
+KUBELET_CONFIG="--kubeconfig=/etc/kubernetes/kubelet.kubeconfig"
+#
+## pod infrastructure container
+KUBELET_POD_INFRA_CONTAINER="--pod-infra-container-image=$Pause_Image"
+#
+## Add your own!
+KUBELET_ARGS="--cluster-dns=$4  --serialize-image-pulls=false  --bootstrap-kubeconfig=/etc/kubernetes/bootstrap.kubeconfig  --kubeconfig=/etc/kubernetes/kubelet.kubeconfig  --cert-dir=/etc/kubernetes/kubernetesTLS  --cluster-domain=cluster.local.  --hairpin-mode=promiscuous-bridge "
+EOF
+  logger info "Install_kubelet : enable and start kubelet"
+  systemctl  enable kubelet.service && systemctl  restart kubelet.service
+  sleep 4
+  systemctl status kubelet|grep Active|grep -q running &> /dev/null && logger info "Install_kubelet : kubelet安装successful"
+  echo ""
+}
+
+function Kube_proxy_install() {
+  systemctl status kube-proxy |grep Active|grep -q running &> /dev/null && { logger warn "Install_kube-proxy : kube-proxy已经在运行了."; return 0; }
+  logger debug "Install_kube-proxy : cp -r $1/kube-proxy /usr/local/bin/"
+  [[ -f /usr/local/bin/kube-proxy ]] || \cp -r $1/kube-proxy /usr/local/bin/ && chmod +x /usr/local/bin/kube-proxy &> /dev/null
+  logger info "Install_kube_proxy : 拷贝kube-proxy.service"
+  cat > /usr/lib/systemd/system/kube-proxy.service << EOF
+[Unit]
+Description=Kube Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/kubernetes/config
+EnvironmentFile=-/etc/kubernetes/proxy
+ExecStart=/usr/local/bin/kube-proxy \\
+            \$KUBE_LOGTOSTDERR \\
+            \$KUBE_LOG_LEVEL \\
+            \$KUBE_MASTER \\
+            \$KUBE_PROXY_ARGS
+
+Restart=always
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target
+EOF
+
+  logger info "Install_kube_proxy : 生成proxy配置文件"
+
+   cat > /etc/kubernetes/proxy << EOF
+###
+# kubernetes proxy config
+
+# defaults from config and proxy should be adequate
+
+# Add your own!
+KUBE_PROXY_ARGS="--kubeconfig=/etc/kubernetes/kube-proxy.kubeconfig  \\
+                 --cluster-cidr=$2 \\
+                 --masquerade-all \\
+                 --feature-gates=SupportIPVSProxyMode=true \\
+                 --proxy-mode=ipvs \\
+                 --ipvs-min-sync-period=5s \\
+                 --ipvs-sync-period=5s \\
+                 --ipvs-scheduler=rr"
+EOF
+  logger info "Install_kube-proxy : enable and start kube-proxy"
+  systemctl  enable kube-proxy.service && systemctl  restart kube-proxy.service
+  sleep 4
+  systemctl status kube-proxy|grep Active|grep -q running &> /dev/null && logger info "Install_kube-proxy : kube-proxy安装成功successful"
+  echo ""
+}
+
+function Flannel_install() {
+  systemctl status flanneld |grep Active|grep -q running &> /dev/null && { logger warn "Install_flannel : flannel已经在运行了."; return 0; }
+  logger debug "Install_flannel"
+  mkdir /usr/libexec/flannel/ /etc/etcd/ -p &> /dev/null
+  [[ -f "/usr/bin/flanneld" ]] || \cp -r $1/flanneld /usr/bin/ && chmod +x /usr/bin/flanneld &> /dev/null
+  [[ -f "/usr/libexec/flannel/mk-docker-opts.sh" ]] || \cp -r $1/mk-docker-opts.sh /usr/libexec/flannel/mk-docker-opts.sh && chmod +x /usr/libexec/flannel/mk-docker-opts.sh &> /dev/null
+  [[ -f "/usr/bin/flanneld-start" ]] || \cp -r $1/flanneld-start /usr/bin/ && chmod +x /usr/bin/flanneld-start &> /dev/null
+  [[ -d "/etc/etcd/etcdSSL/" ]] || \cp -r $1/etcdSSL /etc/etcd/ &> /dev/null
+
+  logger info "Install_flannel : 生成 flanneld.service"
+  cat > /usr/lib/systemd/system/flanneld.service << EOF
+[Unit]
+Description=Flanneld overlay address etcd agent
+After=network.target
+After=network-online.target
+Wants=network-online.target
+After=etcd.service
+Before=docker.service
+
+[Service]
+Type=notify
+EnvironmentFile=/etc/sysconfig/flanneld
+EnvironmentFile=-/etc/sysconfig/docker-network
+ExecStart=/usr/bin/flanneld-start \$FLANNEL_OPTIONS
+ExecStartPost=/usr/libexec/flannel/mk-docker-opts.sh -k DOCKER_NETWORK_OPTIONS -d /run/flannel/docker
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=docker.service
+EOF
+  logger info "Install_flannel : 生成 /etc/sysconfig/flanneld"
+  cat > /etc/sysconfig/flanneld << EOF
+# Flanneld configuration options
+
+# etcd url location.  Point this to the server where etcd runs
+FLANNEL_ETCD_ENDPOINTS="$2"
+
+# etcd config key.  This is the configuration key that flannel queries
+# For address range assignment
+FLANNEL_ETCD_PREFIX="/k8s/network"
+
+# Any additional options that you want to pass
+FLANNEL_OPTIONS="--etcd-cafile=/etc/etcd/etcdSSL/ca.pem  --etcd-certfile=/etc/etcd/etcdSSL/etcd.pem  --etcd-keyfile=/etc/etcd/etcdSSL/etcd-key.pem --log_dir=/var/log/k8s/flannel/"
+EOF
+
+  logger info "Install_flannel : 配置Docker"
+  cat > /usr/lib/systemd/system/docker.service << EOF
+[Unit]
+Description=Docker Application Container Engine
+Documentation=https://docs.docker.com
+BindsTo=containerd.service
+After=network-online.target firewalld.service containerd.service flannled.service
+Wants=network-online.target
+Requires=docker.socket
+
+[Service]
+Type=notify
+# the default is not to use systemd for cgroups because the delegate issues still
+# exists and systemd currently does not support the cgroup feature set required
+# for containers run by docker
+EnvironmentFile=-/var/run/flannel/subnet.env
+ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock  --bip=\${FLANNEL_SUBNET} --mtu=\${FLANNEL_MTU}
+ExecStartPost=/sbin/iptables -I FORWARD -s 0.0.0.0/0 -j ACCEPT
+ExecReload=/bin/kill -s HUP \$MAINPID
+TimeoutSec=0
+RestartSec=2
+Restart=always
+
+# Note that StartLimit* options were moved from "Service" to "Unit" in systemd 229.
+# Both the old, and new location are accepted by systemd 229 and up, so using the old location
+# to make them work for either version of systemd.
+StartLimitBurst=3
+
+# Note that StartLimitInterval was renamed to StartLimitIntervalSec in systemd 230.
+# Both the old, and new name are accepted by systemd 230 and up, so using the old name to make
+# this option work for either version of systemd.
+StartLimitInterval=60s
+
+# Having non-zero Limit*s causes performance problems due to accounting overhead
+# in the kernel. We recommend using cgroups to do container-local accounting.
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+
+# Comment TasksMax if your systemd version does not support it.
+# Only systemd 226 and above support this option.
+TasksMax=infinity
+
+# set delegate yes so that systemd does not reset the cgroups of docker containers
+Delegate=yes
+
+# kill only the docker process, not all processes in the cgroup
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  logger info "Install_flannel : enable and start flannel"
+  systemctl enable flanneld.service && systemctl restart flanneld.service
+  sleep 1
+
+  logger info "Install_flannel : 使用Flannel网络，重启Docker"
+  systemctl daemon-reload && systemctl restart docker.service
+  systemctl status flanneld|grep Active|grep -q running &> /dev/null && logger info "Install_flannel : flannel安装successful"
+
+}
+
+function Delete_Package_router() {
+  logger info "删除 $1 安装包目录 /tmp/nodefile "
+  rm -rf /tmp/nodefile & > /dev/null
+}
+
+function Remote_master_add_node() {
+  logger debug "Join_Cluser : 查看是否有节点需要添加 kubectl get csr | grep -v NAME | grep Pending"
+  kubectl get csr | grep -v NAME | grep Pending
+  if [[ $? -eq 0 ]];then
+     logger info "Join_Cluser : $1 加入集群"
+     sshpass -p $Ma_Passwd ssh -o StrictHostKeyChecking=no $IP_Master "kubectl certificate approve `kubectl get csr | grep -v NAME | grep Pending | cut -d " " -f 1`"
+     sleep 6
+  fi
+
+  result=`sshpass -p $Ma_Passwd ssh -o StrictHostKeyChecking=no $IP_Master "kubectl get node | grep -v NAME | cut -d \" \" -f 1 "`
+  for ip in $result
+  do
+        if [[ "$ip" = "$1" ]];then
+           logger info "查看集群 : kubectl get node -o wide"
+           sshpass -p $Ma_Passwd ssh -o StrictHostKeyChecking=no $IP_Master "kubectl get node -o wide"
+           sleep 2
+        fi
+  done
+}
+
+function Install() {
+  Scp_remote_host $1
+  logger info "获取ETCD集群地址"
+  ETCD_INIT_Cluster=`sshpass -p $Ma_Passwd ssh -o StrictHostKeyChecking=no $IP_Master "cat /etc/kubernetes/apiserver | grep KUBE_ETCD_SERVERS | cut -d '=' -f 3"`
+  ETCD_INIT_Cluster="${ETCD_INIT_Cluster%\"}"
+  logger debug "$ETCD_INIT_Cluster"
+  ssh $1 "$(typeset -f logger Init_server); Init_server"
+  ssh $1 "$(typeset -f logger Bash_install); Bash_install"
+  ssh $1 "$(typeset -f logger Docker_install); Docker_install"
+  ssh $1 "$(typeset -f logger Docker_image_load); Docker_image_load"
+  ssh $1 "$(typeset -f logger Kubelet_install); Kubelet_install $1 $Base_Dir $Arch $Cluster_dns"
+  ssh $1 "$(typeset -f logger Kube_proxy_install); Kube_proxy_install $Base_Dir $Cluster_cidr"
+  ssh $1 "$(typeset -f logger Flannel_install); Flannel_install $Base_Dir $ETCD_INIT_Cluster"
+  ssh $1 "$(typeset -f logger Delete_Package_router); Delete_Package_router $1"
+  Remote_master_add_node $1
+}
+
+function Disposable_Install () {
+  Download_resource
+  Check_env
+  Read_env_txt
+  Scp_master_local
+  for ip in $IP_Node_Array
+  do
+     Arch=`sshpass -p $Nd_Passwd ssh -o StrictHostKeyChecking=no $ip "uname -m;mkdir /tmp/nodefile /etc/etcd/ /etc/kubernetes/ &> /dev/null;exit"`
+     logger info "\033[0;31;1m服务器 $ip 为 $Arch 架构,执行 $Arch 架构安装 \033[0m"
+     Install $ip
+  done
+}
+
+function main() {
+
+  [[ "$#" -eq 0 ]] && { usage >&2; exit 1; }
+
+  [[ "$EUID" -ne 0 ]] && { logger error "你应该用 root 用户执行此脚本"; exit 1; }
+
+  ACTION=""
+  while getopts "WP" OPTION; do
+      case "$OPTION" in
+        W)
+          if [[ -f "env.txt" ]]
+          then
+                ACTION="Exist_env_txt"
+          else
+                ACTION="Environment"
+          fi
+        ;;
+        P)
+          ACTION="Disposable_Install"
+        ;;
+        ?)
+          usage
+          exit 1
+          ;;
+      esac
+  done
+
+  [[ "$ACTION" == "" ]] && { logger error "error option"; usage; exit 1; }
+
+  # excute cmd "$ACTION"
+  logger info "Action begin: $ACTION"
+  ${ACTION} || { logger error "Action failed: $ACTION"; return 1; }
+  logger info "Action successful: $ACTION"
+
+}
+
+main "$@"
