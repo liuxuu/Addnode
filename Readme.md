@@ -10,7 +10,7 @@
 
 2、支持x86、arm不同架构服务器同时安装（会自行判断服务器架构安装）
 
-3、执行脚本服务也没网
+3、执行脚本服务器也没有网络
 wget https://jiaofu-tools.obs.cn-east-2.myhuaweicloud.com/nodefile.tar.gz -P /tmp
 ./Addnode -P
 
