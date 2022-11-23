@@ -11,7 +11,7 @@
 2、支持x86、arm不同架构服务器同时安装（会自行判断服务器架构安装）
 
 3、执行脚本服务器也没有网络
-wget https://jiaofu-tools.obs.cn-east-2.myhuaweicloud.com/nodefile.tar.gz -P /tmp
+下载安装包 https://jiaofu-tools.obs.cn-east-2.myhuaweicloud.com/nodefile.tar.gz 上传到执行服务器 /tmp 下
 ./Addnode -P
 
 4、如在安装过程中遇到错误，之前的操作可重复执行，有相应判断
@@ -27,6 +27,12 @@ chmod +x Addnode
 ```
 
 ### 查看使用
+
+#### 选择脚本执行服务器
+```shell
+建议Kubernetes Master执行即可
+没有限制执行服务器
+```
 
 ```shell
 [root@ddavd ~]# ./Addnode 
